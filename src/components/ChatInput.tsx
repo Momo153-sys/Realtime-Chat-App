@@ -11,12 +11,14 @@ const ChatInput = ({ onSend }: ChatInputProps) => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSend = () => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    onSend(trimmed);
-    setText("");
-    inputRef.current?.focus();
-  };
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  // Immediately send message with status 'sent'
+  onSend(trimmed);
+  setText("");
+  inputRef.current?.focus();
+};
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
