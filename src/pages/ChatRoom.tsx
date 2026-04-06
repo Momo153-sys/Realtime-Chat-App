@@ -11,7 +11,6 @@ import { Models, RealtimeResponseEvent } from "appwrite";
 const DB_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID;
 const MSGS_COL_ID = import.meta.env.VITE_APPWRITE_MESSAGES_COLLECTION_ID;
 const PROFILES_COL_ID = import.meta.env.VITE_APPWRITE_PROFILES_COLLECTION_ID;
-const SETTINGS_COL_ID = import.meta.env.VITE_APPWRITE_SETTINGS_COLLECTION_ID;
 
 interface MessageDocument extends Models.Document {
   content: string;
@@ -36,27 +35,85 @@ const ChatRoom = () => {
   const [loading, setLoading] = useState(true);
 
   const bottomRef = useRef<HTMLDivElement>(null);
+  const subscriptionRef = useRef<(() => void) | null>(null);
 
   const scrollToBottom = () => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // Fetch + subscribe messages (with delivery states)
+  // ✅ Reconnect on network restore
+  useEffect(() => {
+    const handleOnline = () => {
+      console.log("Reconnecting...");
+      window.location.reload(); // simple and reliable
+    };
+
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
+
+  // ✅ Fetch initial data
   useEffect(() => {
     if (authLoading || !conversationId || !user?.$id) return;
+
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+
+        const userIds = conversationId.split("_");
+        const otherUserId = userIds.find((id) => id !== user.$id);
+
+        if (otherUserId) {
+          const profile = await databases.getDocument(
+            DB_ID,
+            PROFILES_COL_ID,
+            otherUserId
+          );
+          setOtherUser(profile as ProfileDocument);
+        }
+
+        const res = await databases.listDocuments(DB_ID, MSGS_COL_ID, [
+          Query.equal("conversation_id", conversationId),
+          Query.orderAsc("sent_at"),
+        ]);
+
+        setMessages(res.documents as MessageDocument[]);
+        setTimeout(scrollToBottom, 100);
+      } catch (err: any) {
+        console.error("Fetch error:", err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [conversationId, user?.$id, authLoading]);
+
+  // ✅ Realtime subscription (SAFE)
+  useEffect(() => {
+    if (authLoading || !conversationId || !user?.$id) return;
+
+    // prevent duplicate subscriptions
+    if (subscriptionRef.current) return;
 
     const unsubscribe = client.subscribe(
       `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
       async (response: RealtimeResponseEvent<MessageDocument>) => {
         const payload = response.payload;
-        const isCreate = response.events.some((e) => e.includes("create"));
-        const isUpdate = response.events.some((e) => e.includes("update"));
+        const isCreate = response.events.some((e) =>
+          e.includes("create")
+        );
+        const isUpdate = response.events.some((e) =>
+          e.includes("update")
+        );
 
         if (payload.conversation_id !== conversationId) return;
 
+        // 🟢 New message
         if (isCreate) {
           setMessages((prev) => {
             if (prev.find((m) => m.$id === payload.$id)) return prev;
+
             const updated = [...prev, payload];
             setTimeout(scrollToBottom, 50);
             return updated;
@@ -64,12 +121,18 @@ const ChatRoom = () => {
 
           // mark delivered
           if (payload.sender_id !== user.$id) {
-            await databases.updateDocument(DB_ID, MSGS_COL_ID, payload.$id, {
-              status: "delivered",
-            });
+            try {
+              await databases.updateDocument(
+                DB_ID,
+                MSGS_COL_ID,
+                payload.$id,
+                { status: "delivered" }
+              );
+            } catch {}
           }
         }
 
+        // 🔵 Update message (status changes)
         if (isUpdate) {
           setMessages((prev) =>
             prev.map((m) => (m.$id === payload.$id ? payload : m))
@@ -78,39 +141,29 @@ const ChatRoom = () => {
       }
     );
 
-    const fetchData = async () => {
-      const userIds = conversationId.split("_");
-      const otherUserId = userIds.find((id) => id !== user.$id);
+    subscriptionRef.current = unsubscribe;
 
-      if (otherUserId) {
-        const profile = await databases.getDocument(DB_ID, PROFILES_COL_ID, otherUserId);
-        setOtherUser(profile as ProfileDocument);
+    return () => {
+      try {
+        subscriptionRef.current?.();
+        subscriptionRef.current = null;
+      } catch {
+        console.warn("Socket already closed");
       }
-
-      const res = await databases.listDocuments(DB_ID, MSGS_COL_ID, [
-        Query.equal("conversation_id", conversationId),
-        Query.orderAsc("sent_at"),
-      ]);
-
-      setMessages(res.documents as MessageDocument[]);
-      setLoading(false);
-      setTimeout(scrollToBottom, 100);
     };
-
-    fetchData();
-
-    return () => unsubscribe();
   }, [conversationId, user?.$id, authLoading]);
 
-  // Seen status
+  // ✅ Mark messages as seen
   useEffect(() => {
     if (!user?.$id) return;
 
     messages.forEach(async (msg) => {
       if (msg.sender_id !== user.$id && msg.status !== "seen") {
-        await databases.updateDocument(DB_ID, MSGS_COL_ID, msg.$id, {
-          status: "seen",
-        });
+        try {
+          await databases.updateDocument(DB_ID, MSGS_COL_ID, msg.$id, {
+            status: "seen",
+          });
+        } catch {}
       }
     });
   }, [messages]);
@@ -118,16 +171,22 @@ const ChatRoom = () => {
   const handleSend = async (text: string) => {
     if (!user?.$id || !conversationId) return;
 
-    await databases.createDocument(DB_ID, MSGS_COL_ID, ID.unique(), {
-      content: text,
-      sender_id: user.$id,
-      conversation_id: conversationId,
-      sent_at: new Date().toISOString(),
-      status: "sent",
-    });
+    try {
+      await databases.createDocument(DB_ID, MSGS_COL_ID, ID.unique(), {
+        content: text,
+        sender_id: user.$id,
+        conversation_id: conversationId,
+        sent_at: new Date().toISOString(),
+        status: "sent",
+      });
+    } catch (err: any) {
+      console.error("Send error:", err.message);
+    }
   };
 
-  if (authLoading) return <div className="p-8 text-center">Authenticating...</div>;
+  if (authLoading) {
+    return <div className="p-8 text-center">Authenticating...</div>;
+  }
 
   return (
     <div className="flex flex-col h-screen max-w-2xl mx-auto border-x">
@@ -151,6 +210,10 @@ const ChatRoom = () => {
       <div className="flex-1 overflow-y-auto p-4">
         {loading ? (
           <div>Loading...</div>
+        ) : messages.length === 0 ? (
+          <div className="text-center text-gray-500">
+            No messages yet
+          </div>
         ) : (
           messages.map((msg) => (
             <ChatMessage
