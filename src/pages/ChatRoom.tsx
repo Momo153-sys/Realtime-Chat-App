@@ -27,7 +27,6 @@ interface ProfileDocument extends Models.Document {
 }
 
 const ChatRoom = () => {
-  // Use 'id' to match your route definition /chat/:id
   const { id: conversationId } = useParams<{ id: string }>();
   const { user, loading: authLoading } = useAuth(); 
   const navigate = useNavigate();
@@ -43,30 +42,27 @@ const ChatRoom = () => {
 
   const lastSyncedId = useRef<string | null>(null);
 
-  // --- NEW: Mark as Read Logic ---
+  // --- Mark as Read Logic ---
   useEffect(() => {
+    let isMounted = true;
     const markAsRead = async () => {
       if (authLoading || !conversationId || !user?.$id || lastSyncedId.current === conversationId) return;
 
       try {
-
-        lastSyncedId.current = conversationId; // Mark as "syncing" immediately
-        
-        // Check if a record exists for this user + this chat
+        lastSyncedId.current = conversationId;
         const existing = await databases.listDocuments(DB_ID, SETTINGS_COL_ID, [
           Query.equal("user_id", user.$id),
           Query.equal("conversation_id", conversationId)
         ]);
 
-        const now = new Date().toISOString();
+        if (!isMounted) return;
 
+        const now = new Date().toISOString();
         if (existing.total > 0) {
-          // Update existing timestamp
           await databases.updateDocument(DB_ID, SETTINGS_COL_ID, existing.documents[0].$id, {
             last_read_at: now
           });
         } else {
-          // Create new record
           await databases.createDocument(DB_ID, SETTINGS_COL_ID, ID.unique(), {
             user_id: user.$id,
             conversation_id: conversationId,
@@ -79,29 +75,29 @@ const ChatRoom = () => {
     };
 
     markAsRead();
+    return () => { isMounted = false; };
   }, [conversationId, user?.$id, authLoading]);
-  // -------------------------------
 
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
+  // --- Realtime & Data Fetching ---
   useEffect(() => {
     if (authLoading || !conversationId || !user?.$id) return;
 
-    let unsubscribe: () => void;
+    let unsubscribe: (() => void) | undefined;
+    let isMounted = true;
 
-    const fetchData = async () => {
-      if (!conversationId) return; // Guard clause
-
+    const fetchDataAndSubscribe = async () => {
       try {
         const userIds = conversationId.split("_");
-        if (userIds.length < 2) return; // Ensure it's a valid chat ID
+        if (userIds.length < 2) return;
         const otherUserId = userIds.find((id) => id !== user.$id);
 
         if (otherUserId) {
           const profile = await databases.getDocument(DB_ID, PROFILES_COL_ID, otherUserId);
-          setOtherUser(profile as unknown as ProfileDocument);
+          if (isMounted) setOtherUser(profile as unknown as ProfileDocument);
         }
 
         const msgRes = await databases.listDocuments(DB_ID, MSGS_COL_ID, [
@@ -109,37 +105,40 @@ const ChatRoom = () => {
           Query.orderAsc("sent_at"),
           Query.limit(100),
         ]);
-        setMessages(msgRes.documents as unknown as MessageDocument[]);
+        
+        if (isMounted) {
+          setMessages(msgRes.documents as unknown as MessageDocument[]);
+          setLoading(false);
+
+          // Only subscribe after initial data is loaded and component is still mounted
+          unsubscribe = client.subscribe(
+            `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
+            (response: RealtimeResponseEvent<MessageDocument>) => {
+              const payload = response.payload;
+              const isNewMessage = response.events.some((e) => e.includes("create"));
+
+              if (isNewMessage && payload.conversation_id === conversationId) {
+                setMessages((prev) => {
+                  if (prev.find((m) => m.$id === payload.$id)) return prev;
+                  return [...prev, payload];
+                });
+              }
+            }
+          );
+        }
       } catch (error) {
         console.error("ChatRoom Init Error:", error);
-      } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
-    fetchData();
-
-    try {
-      unsubscribe = client.subscribe(
-        `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
-        (response: RealtimeResponseEvent<MessageDocument>) => {
-          const payload = response.payload;
-          const isNewMessage = response.events.some((e) => e.includes("create"));
-
-          if (isNewMessage && payload.conversation_id === conversationId) {
-            setMessages((prev) => {
-              if (prev.find((m) => m.$id === payload.$id)) return prev;
-              return [...prev, payload];
-            });
-          }
-        }
-      );
-    } catch (err) {
-      console.error("WebSocket failed to initialize:", err);
-    }
+    fetchDataAndSubscribe();
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      isMounted = false;
+      if (unsubscribe) {
+        unsubscribe();
+      }
     };
   }, [conversationId, user?.$id, authLoading]);
 
