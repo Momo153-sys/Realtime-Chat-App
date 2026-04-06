@@ -1,16 +1,17 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { client, databases, ID, Query } from "@/lib/appwrite";
+import { Client, databases, ID, Query, Models, RealtimeResponseEvent } from "appwrite";
 import { useAuth } from "@/hooks/userAuth";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Models, RealtimeResponseEvent } from "appwrite";
 
 const DB_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID;
 const MSGS_COL_ID = import.meta.env.VITE_APPWRITE_MESSAGES_COLLECTION_ID;
 const PROFILES_COL_ID = import.meta.env.VITE_APPWRITE_PROFILES_COLLECTION_ID;
+const APPWRITE_ENDPOINT = import.meta.env.VITE_APPWRITE_ENDPOINT;
+const APPWRITE_PROJECT = import.meta.env.VITE_APPWRITE_PROJECT_ID;
 
 interface MessageDocument extends Models.Document {
   content: string;
@@ -37,50 +38,37 @@ const ChatRoom = () => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const subscriptionRef = useRef<(() => void) | null>(null);
 
-  const scrollToBottom = () => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+
+  // ---------- Fresh Client for WebSocket ----------
+  const createRealtimeClient = () => {
+    return new Client().setEndpoint(APPWRITE_ENDPOINT).setProject(APPWRITE_PROJECT);
   };
 
-  // ✅ Reconnect on network restore
-  useEffect(() => {
-    const handleOnline = () => {
-      console.log("Reconnecting...");
-      window.location.reload(); // simple and reliable
-    };
-
-    window.addEventListener("online", handleOnline);
-    return () => window.removeEventListener("online", handleOnline);
-  }, []);
-
-  // ✅ Fetch initial data
+  // ---------- Fetch initial messages and other user ----------
   useEffect(() => {
     if (authLoading || !conversationId || !user?.$id) return;
 
     const fetchData = async () => {
+      setLoading(true);
       try {
-        setLoading(true);
-
+        // Get the other user
         const userIds = conversationId.split("_");
         const otherUserId = userIds.find((id) => id !== user.$id);
-
         if (otherUserId) {
-          const profile = await databases.getDocument(
-            DB_ID,
-            PROFILES_COL_ID,
-            otherUserId
-          );
+          const profile = await databases.getDocument(DB_ID, PROFILES_COL_ID, otherUserId);
           setOtherUser(profile as ProfileDocument);
         }
 
+        // Get initial messages
         const res = await databases.listDocuments(DB_ID, MSGS_COL_ID, [
           Query.equal("conversation_id", conversationId),
           Query.orderAsc("sent_at"),
         ]);
-
         setMessages(res.documents as MessageDocument[]);
         setTimeout(scrollToBottom, 100);
       } catch (err: any) {
-        console.error("Fetch error:", err.message);
+        console.error("Fetch messages error:", err.message);
       } finally {
         setLoading(false);
       }
@@ -89,50 +77,42 @@ const ChatRoom = () => {
     fetchData();
   }, [conversationId, user?.$id, authLoading]);
 
-  // ✅ Realtime subscription (SAFE)
+  // ---------- Realtime subscription ----------
   useEffect(() => {
     if (authLoading || !conversationId || !user?.$id) return;
+    if (subscriptionRef.current) return; // prevent duplicate subscriptions
 
-    // prevent duplicate subscriptions
-    if (subscriptionRef.current) return;
+    const clientInstance = createRealtimeClient();
 
-    const unsubscribe = client.subscribe(
+    const unsubscribe = clientInstance.subscribe(
       `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
       async (response: RealtimeResponseEvent<MessageDocument>) => {
         const payload = response.payload;
-        const isCreate = response.events.some((e) =>
-          e.includes("create")
-        );
-        const isUpdate = response.events.some((e) =>
-          e.includes("update")
-        );
+        const isCreate = response.events.some((e) => e.includes("create"));
+        const isUpdate = response.events.some((e) => e.includes("update"));
 
         if (payload.conversation_id !== conversationId) return;
 
-        // 🟢 New message
+        // ---------- New message ----------
         if (isCreate) {
           setMessages((prev) => {
             if (prev.find((m) => m.$id === payload.$id)) return prev;
-
             const updated = [...prev, payload];
             setTimeout(scrollToBottom, 50);
             return updated;
           });
 
-          // mark delivered
+          // mark delivered if it's not from me
           if (payload.sender_id !== user.$id) {
             try {
-              await databases.updateDocument(
-                DB_ID,
-                MSGS_COL_ID,
-                payload.$id,
-                { status: "delivered" }
-              );
+              await databases.updateDocument(DB_ID, MSGS_COL_ID, payload.$id, {
+                status: "delivered",
+              });
             } catch {}
           }
         }
 
-        // 🔵 Update message (status changes)
+        // ---------- Update message ----------
         if (isUpdate) {
           setMessages((prev) =>
             prev.map((m) => (m.$id === payload.$id ? payload : m))
@@ -147,13 +127,11 @@ const ChatRoom = () => {
       try {
         subscriptionRef.current?.();
         subscriptionRef.current = null;
-      } catch {
-        console.warn("Socket already closed");
-      }
+      } catch {}
     };
   }, [conversationId, user?.$id, authLoading]);
 
-  // ✅ Mark messages as seen
+  // ---------- Mark incoming messages as seen ----------
   useEffect(() => {
     if (!user?.$id) return;
 
@@ -168,9 +146,9 @@ const ChatRoom = () => {
     });
   }, [messages]);
 
+  // ---------- Send message ----------
   const handleSend = async (text: string) => {
     if (!user?.$id || !conversationId) return;
-
     try {
       await databases.createDocument(DB_ID, MSGS_COL_ID, ID.unique(), {
         content: text,
@@ -180,22 +158,19 @@ const ChatRoom = () => {
         status: "sent",
       });
     } catch (err: any) {
-      console.error("Send error:", err.message);
+      console.error("Send message error:", err.message);
     }
   };
 
-  if (authLoading) {
-    return <div className="p-8 text-center">Authenticating...</div>;
-  }
+  if (authLoading) return <div className="p-8 text-center">Authenticating...</div>;
 
   return (
-    <div className="flex flex-col h-screen max-w-2xl mx-auto border-x">
+    <div className="flex flex-col h-screen max-w-2xl mx-auto border-x bg-background">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-4 border-b sticky top-0 bg-white">
+      <div className="flex items-center gap-3 px-4 py-4 border-b sticky top-0 bg-white z-10">
         <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
           <ArrowLeft />
         </Button>
-
         {otherUser && (
           <div>
             <h1 className="font-bold">{otherUser.username}</h1>
@@ -209,11 +184,9 @@ const ChatRoom = () => {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4">
         {loading ? (
-          <div>Loading...</div>
+          <div className="text-center text-gray-500">Loading messages...</div>
         ) : messages.length === 0 ? (
-          <div className="text-center text-gray-500">
-            No messages yet
-          </div>
+          <div className="text-center text-gray-500">No messages yet</div>
         ) : (
           messages.map((msg) => (
             <ChatMessage
