@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Client, databases, ID, Query, Models, RealtimeResponseEvent } from "appwrite";
+import { Client, ID, Query, Models, RealtimeResponseEvent } from "appwrite";
+import { databases } from "../lib/appwrite";
 import { useAuth } from "@/hooks/userAuth";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
