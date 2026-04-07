@@ -22,7 +22,7 @@ interface MessageDocument extends Models.Document {
 }
 
 const ChatRoom = () => {
-  const { conversationId } = useParams<{ id: string }>();
+  const { conversationId } = useParams<{ conversationId: string }>();
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
