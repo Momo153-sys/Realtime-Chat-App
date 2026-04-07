@@ -10,4 +10,4 @@ export const client = new Client()
 export const account = new Account(client);
 export const databases = new Databases(client);
 
-export { ID, Query, Models, RealtimeResponseEvent }; // ✅ Export types
+export { ID, Query, type Models, type RealtimeResponseEvent }; // ✅ Export types
