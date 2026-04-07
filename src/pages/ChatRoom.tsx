@@ -34,12 +34,16 @@ const ChatRoom = () => {
   const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: "smooth" });
 
   useEffect(() => {
-    if (authLoading || !conversationId || !user?.$id) return;
+    if (authLoading || !conversationId || !user?.$id){
+      console.log("❌ Missing User ID or Conversation ID", { userId: user?.$id, conversationId });
+      return;
+    } 
 
     let isMounted = true;
     let unsubscribe: () => void;
 
     const initChat = async () => {
+      console.log("🚀 initChat started for:", conversationId);
       setLoading(true);
       try {
         // 1. Get other user info
@@ -59,6 +63,7 @@ const ChatRoom = () => {
         
         if (isMounted) {
           setMessages(res.documents as MessageDocument[]);
+          console.log("✅ Messages received:", res.documents.length);
           setLoading(false);
           setTimeout(scrollToBottom, 100);
         }
