@@ -17,6 +17,7 @@ interface MessageDocument extends Models.Document {
   sender_id: string;
   conversation_id: string;
   sent_at: string;
+  is_read?: boolean;
   status?: "sent" | "delivered" | "seen";
 }
 
@@ -108,6 +109,7 @@ const ChatRoom = () => {
         conversation_id: conversationId,
         sent_at: new Date().toISOString(),
         status: "sent",
+        is_read: false,
       });
     } catch (err) {
       console.error("Send error:", err);
