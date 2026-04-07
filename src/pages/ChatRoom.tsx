@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Client, ID, Query, Models, RealtimeResponseEvent } from "appwrite";
-import { databases } from "../lib/appwrite";
+import { ID, Query, Models, RealtimeResponseEvent } from "appwrite";
+import { databases, client } from "../lib/appwrite"; // <-- Using the shared client!
 import { useAuth } from "@/hooks/userAuth";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
@@ -11,8 +11,6 @@ import { Button } from "@/components/ui/button";
 const DB_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID;
 const MSGS_COL_ID = import.meta.env.VITE_APPWRITE_MESSAGES_COLLECTION_ID;
 const PROFILES_COL_ID = import.meta.env.VITE_APPWRITE_PROFILES_COLLECTION_ID;
-const APPWRITE_ENDPOINT = import.meta.env.VITE_APPWRITE_ENDPOINT;
-const APPWRITE_PROJECT = import.meta.env.VITE_APPWRITE_PROJECT_ID;
 
 interface MessageDocument extends Models.Document {
   content: string;
@@ -22,132 +20,85 @@ interface MessageDocument extends Models.Document {
   status?: "sent" | "delivered" | "seen";
 }
 
-interface ProfileDocument extends Models.Document {
-  username: string;
-  is_online: boolean;
-}
-
 const ChatRoom = () => {
   const { id: conversationId } = useParams<{ id: string }>();
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
   const [messages, setMessages] = useState<MessageDocument[]>([]);
-  const [otherUser, setOtherUser] = useState<ProfileDocument | null>(null);
+  const [otherUser, setOtherUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-
   const bottomRef = useRef<HTMLDivElement>(null);
-  const subscriptionRef = useRef<(() => void) | null>(null);
 
   const scrollToBottom = () => bottomRef.current?.scrollIntoView({ behavior: "smooth" });
 
-  // ---------- Fresh Client for WebSocket ----------
-  const createRealtimeClient = () => {
-    return new Client().setEndpoint(APPWRITE_ENDPOINT).setProject(APPWRITE_PROJECT);
-  };
-
-  // ---------- Fetch initial messages and other user ----------
   useEffect(() => {
     if (authLoading || !conversationId || !user?.$id) return;
 
-    const fetchData = async () => {
+    let isMounted = true;
+    let unsubscribe: () => void;
+
+    const initChat = async () => {
       setLoading(true);
       try {
-        // Get the other user
+        // 1. Get other user info
         const userIds = conversationId.split("_");
         const otherUserId = userIds.find((id) => id !== user.$id);
-        if (otherUserId) {
+        if (otherUserId && isMounted) {
           const profile = await databases.getDocument(DB_ID, PROFILES_COL_ID, otherUserId);
-          setOtherUser(profile as ProfileDocument);
+          setOtherUser(profile);
         }
 
-        // Get initial messages
+        // 2. Load existing messages
         const res = await databases.listDocuments(DB_ID, MSGS_COL_ID, [
           Query.equal("conversation_id", conversationId),
           Query.orderAsc("sent_at"),
+          Query.limit(100)
         ]);
-        setMessages(res.documents as MessageDocument[]);
-        setTimeout(scrollToBottom, 100);
-      } catch (err: any) {
-        console.error("Fetch messages error:", err.message);
-      } finally {
-        setLoading(false);
+        
+        if (isMounted) {
+          setMessages(res.documents as MessageDocument[]);
+          setLoading(false);
+          setTimeout(scrollToBottom, 100);
+        }
+
+        // 3. Start Realtime Subscription ONLY after data is fetched safely
+        unsubscribe = client.subscribe(
+          `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
+          (response: RealtimeResponseEvent<MessageDocument>) => {
+            if (!isMounted) return;
+            const payload = response.payload;
+            
+            if (payload.conversation_id !== conversationId) return;
+
+            if (response.events.some(e => e.includes("create"))) {
+              setMessages((prev) => {
+                if (prev.find(m => m.$id === payload.$id)) return prev;
+                return [...prev, payload];
+              });
+              setTimeout(scrollToBottom, 50);
+            }
+
+            if (response.events.some(e => e.includes("update"))) {
+              setMessages((prev) => prev.map(m => m.$id === payload.$id ? payload : m));
+            }
+          }
+        );
+      } catch (err) {
+        console.error("Chat Init Error:", err);
+        if (isMounted) setLoading(false);
       }
     };
 
-    fetchData();
-  }, [conversationId, user?.$id, authLoading]);
-
-  // ---------- Realtime subscription ----------
-  useEffect(() => {
-    if (authLoading || !conversationId || !user?.$id) return;
-    if (subscriptionRef.current) return; // prevent duplicate subscriptions
-
-    const clientInstance = createRealtimeClient();
-
-    const unsubscribe = clientInstance.subscribe(
-      `databases.${DB_ID}.collections.${MSGS_COL_ID}.documents`,
-      async (response: RealtimeResponseEvent<MessageDocument>) => {
-        const payload = response.payload;
-        const isCreate = response.events.some((e) => e.includes("create"));
-        const isUpdate = response.events.some((e) => e.includes("update"));
-
-        if (payload.conversation_id !== conversationId) return;
-
-        // ---------- New message ----------
-        if (isCreate) {
-          setMessages((prev) => {
-            if (prev.find((m) => m.$id === payload.$id)) return prev;
-            const updated = [...prev, payload];
-            setTimeout(scrollToBottom, 50);
-            return updated;
-          });
-
-          // mark delivered if it's not from me
-          if (payload.sender_id !== user.$id) {
-            try {
-              await databases.updateDocument(DB_ID, MSGS_COL_ID, payload.$id, {
-                status: "delivered",
-              });
-            } catch {}
-          }
-        }
-
-        // ---------- Update message ----------
-        if (isUpdate) {
-          setMessages((prev) =>
-            prev.map((m) => (m.$id === payload.$id ? payload : m))
-          );
-        }
-      }
-    );
-
-    subscriptionRef.current = unsubscribe;
+    initChat();
 
     return () => {
-      try {
-        subscriptionRef.current?.();
-        subscriptionRef.current = null;
-      } catch {}
+      isMounted = false;
+      if (unsubscribe) unsubscribe();
     };
   }, [conversationId, user?.$id, authLoading]);
 
-  // ---------- Mark incoming messages as seen ----------
-  useEffect(() => {
-    if (!user?.$id) return;
-
-    messages.forEach(async (msg) => {
-      if (msg.sender_id !== user.$id && msg.status !== "seen") {
-        try {
-          await databases.updateDocument(DB_ID, MSGS_COL_ID, msg.$id, {
-            status: "seen",
-          });
-        } catch {}
-      }
-    });
-  }, [messages]);
-
-  // ---------- Send message ----------
+  // Handle message sending
   const handleSend = async (text: string) => {
     if (!user?.$id || !conversationId) return;
     try {
@@ -158,54 +109,53 @@ const ChatRoom = () => {
         sent_at: new Date().toISOString(),
         status: "sent",
       });
-    } catch (err: any) {
-      console.error("Send message error:", err.message);
+    } catch (err) {
+      console.error("Send error:", err);
     }
   };
 
-  if (authLoading) return <div className="p-8 text-center">Authenticating...</div>;
+  if (authLoading) return <div className="p-8 text-center font-medium">Authenticating...</div>;
 
   return (
-    <div className="flex flex-col h-screen max-w-2xl mx-auto border-x bg-background">
-      {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-4 border-b sticky top-0 bg-white z-10">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
-          <ArrowLeft />
+    <div className="flex flex-col h-screen max-w-2xl mx-auto bg-background border-x">
+      <div className="flex items-center gap-3 px-4 py-4 border-b bg-card/50 backdrop-blur-md sticky top-0 z-10">
+        <Button variant="ghost" size="icon" onClick={() => navigate("/")} className="rounded-full">
+          <ArrowLeft className="h-5 w-5" />
         </Button>
         {otherUser && (
           <div>
-            <h1 className="font-bold">{otherUser.username}</h1>
-            <p className="text-xs text-gray-500">
-              {otherUser.is_online ? "Active" : "Offline"}
+            <h1 className="text-sm font-bold">{otherUser.username}</h1>
+            <p className="text-[10px] uppercase font-semibold text-muted-foreground">
+              {otherUser.is_online ? "Active Now" : "Offline"}
             </p>
           </div>
         )}
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 overflow-y-auto px-4 py-6">
         {loading ? (
-          <div className="text-center text-gray-500">Loading messages...</div>
+          <div className="text-center text-xs text-muted-foreground">Loading history...</div>
         ) : messages.length === 0 ? (
-          <div className="text-center text-gray-500">No messages yet</div>
+          <div className="text-center text-sm text-muted-foreground mt-10">No messages yet. Say hi! 👋</div>
         ) : (
-          messages.map((msg) => (
-            <ChatMessage
-              key={msg.$id}
-              message={{
-                id: msg.$id,
-                text: msg.content,
-                sender: msg.sender_id === user?.$id ? "user" : "other",
-                timestamp: new Date(msg.sent_at),
-                status: msg.status,
-              }}
-            />
-          ))
+          <div className="flex flex-col gap-1">
+            {messages.map((msg) => (
+              <ChatMessage
+                key={msg.$id}
+                message={{
+                  id: msg.$id,
+                  text: msg.content,
+                  sender: msg.sender_id === user?.$id ? "user" : "other",
+                  timestamp: new Date(msg.sent_at),
+                  status: msg.status,
+                }}
+              />
+            ))}
+          </div>
         )}
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
       <ChatInput onSend={handleSend} />
     </div>
   );
