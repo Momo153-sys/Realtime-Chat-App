@@ -34,7 +34,7 @@ const Auth = () => {
         // ✅ LOGIN FLOW
         // ======================
 
-        await account.createEmailSession(email, password);
+        await account.createEmailPasswordSession(email, password);
 
         await refreshUser(); // 🔥 CRITICAL FIX (sync state immediately)
 
@@ -92,18 +92,16 @@ const Auth = () => {
         }
 
         // 4. Create session
-        await account.createEmailSession(email, password);
+        await account.createEmailPasswordSession(email, password);
 
         // 5. Sync auth state
         await refreshUser(); // 🔥 CRITICAL FIX
 
-        // 6. Email verification
-        await account.createVerification(
-          `${window.location.origin}/verify`
-        );
+      // 6. Notify User 
 
-        toast.success("Account created! Check your email.");
-        navigate("/check-email");
+        toast.success("Request sent! Mohamed (App Owner) has been notified and will confirm your account shortly.", {
+  duration: 6000, // Give them more time to read the specific instructions
+});
       }
     } catch (error: any) {
       console.error(error);
