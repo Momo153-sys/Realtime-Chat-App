@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { MessageCircle } from "lucide-react";
 import { account, databases, ID, Query } from "../lib/appwrite";
 import { toast } from "sonner";
+import { useAuth } from "@/hooks/userAuth";
 
 const DB_ID =
   import.meta.env.VITE_APPWRITE_DATABASE_ID || "69c46802000207e473ff";
@@ -19,11 +20,12 @@ const Auth = () => {
   const [loading, setLoading] = useState(false);
 
   const navigate = useNavigate();
+  const { refreshUser } = useAuth(); // ✅ IMPORTANT FIX
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (loading) return; // prevent double submit
+    if (loading) return;
     setLoading(true);
 
     try {
@@ -31,21 +33,14 @@ const Auth = () => {
         // ======================
         // ✅ LOGIN FLOW
         // ======================
-        const session = await account.createEmailPasswordSession(
-          email,
-          password
-        );
+
+        await account.createEmailSession(email, password);
+
+        await refreshUser(); // 🔥 CRITICAL FIX (sync state immediately)
 
         toast.success("Welcome back!");
         navigate("/");
 
-        // fire-and-forget presence update
-        databases
-          .updateDocument(DB_ID, PROFILES_COL_ID, session.userId, {
-            is_online: true,
-            last_seen: new Date().toISOString(),
-          })
-          .catch(() => {});
       } else {
         // ======================
         // ✅ SIGNUP FLOW
@@ -58,7 +53,7 @@ const Auth = () => {
           return;
         }
 
-        // 1. Check if username already exists
+        // 1. Check if username exists
         const existing = await databases.listDocuments(
           DB_ID,
           PROFILES_COL_ID,
@@ -70,15 +65,14 @@ const Auth = () => {
           return;
         }
 
-        // 2. Create Auth account
+        // 2. Create auth account
         const newAccount = await account.create(
           ID.unique(),
           email,
-          password,
-          normalizedUsername
+          password
         );
 
-        // 3. Create profile (critical step)
+        // 3. Create profile
         try {
           await databases.createDocument(
             DB_ID,
@@ -98,9 +92,12 @@ const Auth = () => {
         }
 
         // 4. Create session
-        await account.createEmailPasswordSession(email, password);
+        await account.createEmailSession(email, password);
 
-        // 5. Send email verification
+        // 5. Sync auth state
+        await refreshUser(); // 🔥 CRITICAL FIX
+
+        // 6. Email verification
         await account.createVerification(
           `${window.location.origin}/verify`
         );
@@ -119,6 +116,7 @@ const Auth = () => {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <div className="w-full max-w-sm space-y-8">
+
         {/* Header */}
         <div className="flex flex-col items-center gap-3 text-center">
           <div className="h-14 w-14 rounded-2xl bg-primary/20 flex items-center justify-center">
@@ -181,6 +179,7 @@ const Auth = () => {
             {isLogin ? "Sign up" : "Sign in"}
           </button>
         </p>
+
       </div>
     </div>
   );
